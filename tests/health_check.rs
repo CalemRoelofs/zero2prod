@@ -26,7 +26,7 @@ async fn new_test_app() -> (TestServer, AppState) {
 
     (
         TestServer::new_with_config(
-            app,
+            app.into_make_service(),
             TestServerConfig {
                 // Preserve cookies across requests
                 // for the session cookie to work.

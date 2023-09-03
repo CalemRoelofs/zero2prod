@@ -17,9 +17,13 @@ axum = "0.6.20"
 axum-macros = "0.3.8"
 chrono = "0.4.28"
 config = "0.13.3"
+log = "0.4.20"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.68"
 tokio = { version = "1.0", features = ["full"] }
+tower = "0.4.13"
+tower-http = { version = "0.4.4", features = ["trace", "request-id"] }
+tower-request-id = "0.2.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.4.1", features = ["v4"] }
