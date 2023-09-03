@@ -14,11 +14,10 @@ use tower_request_id::{RequestId, RequestIdLayer};
 use tracing::{error_span, Level};
 
 pub fn new_app(state: AppState) -> Router {
-    let router = Router::new()
+    Router::new()
         .route("/health_check", get(routes::health_check))
         .route("/subscriptions", post(routes::subscribe))
-        .with_state(state);
-    router
+        .with_state(state)
 }
 
 #[derive(Clone)]
@@ -39,13 +38,12 @@ pub async fn run(config: Settings, db_pool: PgPool) -> Result<()> {
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<Body>| {
-                    // We get the request id from the extensions
                     let request_id = request
                         .extensions()
                         .get::<RequestId>()
                         .map(ToString::to_string)
                         .unwrap_or_else(|| "unknown".into());
-                    // And then we put it along with other information into the `request` span
+
                     error_span!(
                         "request",
                         id = %request_id,
