@@ -1,21 +1,65 @@
 use axum_test::{TestServer, TestServerConfig};
-use zero2prod::startup::new_app;
+use sqlx::{Connection, Executor, PgConnection, PgPool};
+use zero2prod::{
+    configuration::DatabaseSettings,
+    startup::{new_app, AppState},
+};
 
 #[cfg(test)]
-fn new_test_app() -> TestServer {
-    let app = crate::new_app();
+async fn new_test_app() -> (TestServer, AppState) {
+    use std::sync::Arc;
+    use uuid::Uuid;
 
-    TestServer::new_with_config(
-        app,
-        TestServerConfig {
-            // Preserve cookies across requests
-            // for the session cookie to work.
-            save_cookies: true,
-            expect_success_by_default: true,
-            ..TestServerConfig::default()
-        },
+    let mut config = match zero2prod::configuration::get_configuration() {
+        Ok(config) => config,
+        Err(e) => panic!("{}", e),
+    };
+    config.database.database_name = Uuid::new_v4().to_string();
+    let db_pool = configure_database(&config.database).await;
+
+    let state = zero2prod::startup::AppState {
+        config: Arc::new(config),
+        db_pool: Arc::new(db_pool),
+    };
+
+    let app = crate::new_app(state.clone());
+
+    (
+        TestServer::new_with_config(
+            app,
+            TestServerConfig {
+                // Preserve cookies across requests
+                // for the session cookie to work.
+                save_cookies: true,
+                expect_success_by_default: true,
+                ..TestServerConfig::default()
+            },
+        )
+        .unwrap(),
+        state.clone(),
     )
-    .unwrap()
+}
+
+pub async fn configure_database(config: &DatabaseSettings) -> PgPool {
+    // Create database
+    let mut connection = PgConnection::connect(&config.connection_string_without_db())
+        .await
+        .expect("Failed to connect to Postgres");
+    connection
+        .execute(format!(r#"CREATE DATABASE "{}";"#, config.database_name).as_str())
+        .await
+        .expect("Failed to create database.");
+
+    // Migrate database
+    let connection_pool = PgPool::connect(&config.connection_string())
+        .await
+        .expect("Failed to connect to Postgres.");
+    sqlx::migrate!("./migrations")
+        .run(&connection_pool)
+        .await
+        .expect("Failed to migrate the database");
+
+    connection_pool
 }
 
 #[cfg(test)]
@@ -25,7 +69,7 @@ mod health_check_endpoint {
     #[tokio::test]
     async fn health_check_works() {
         // Given
-        let server = new_test_app();
+        let (server, _) = new_test_app().await;
 
         // When
         let response = server.get(&"/health_check").await;
@@ -40,7 +84,6 @@ mod health_check_endpoint {
 mod subscriptions_endpoint {
     use axum::http::StatusCode;
     use serde::Serialize;
-    use sqlx::{Connection, PgConnection};
 
     use crate::new_test_app;
 
@@ -53,19 +96,12 @@ mod subscriptions_endpoint {
     #[tokio::test]
     async fn subscribe_returns_a_200_for_valid_form_data() {
         // Given
-        let server = new_test_app();
-
-        let config =
-            zero2prod::configuration::get_configuration().expect("Failed to load configuration!");
-        let conn_string = config.database.connection_string();
-        let mut conn = PgConnection::connect(&conn_string)
-            .await
-            .expect("Failed to connect to Postgres!");
+        let (server, state) = new_test_app().await;
 
         // When
         let body = &SubscriberForm {
             name: "Le Guin".to_string(),
-            email: "ursula_le_guin@gmail.com".to_string(),
+            email: "ursula_le_guin+{}@gmail.com".to_string(),
         };
         let response = server
             .post(&"/subscriptions")
@@ -76,11 +112,11 @@ mod subscriptions_endpoint {
         assert!(response.status_code().is_success());
 
         let saved = sqlx::query!("SELECT email, name FROM subscriptions")
-            .fetch_one(&mut conn)
+            .fetch_one(state.db_pool.as_ref())
             .await
             .expect("Failed to fetch saved subscription");
 
-        assert_eq!(saved.email, "ursula_le_guin@gmail.com");
+        assert_eq!(saved.email, body.email);
         assert_eq!(saved.name, "Le Guin");
     }
 
@@ -92,7 +128,7 @@ mod subscriptions_endpoint {
     #[tokio::test]
     async fn subscribe_returns_a_400_for_missing_form_data() {
         // Given
-        let server = new_test_app();
+        let (server, _) = new_test_app().await;
 
         // When
         let body = &Name {
