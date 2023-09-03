@@ -1,14 +1,40 @@
 use axum_test::{TestServer, TestServerConfig};
+use once_cell::sync::Lazy;
+use secrecy::ExposeSecret;
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 use zero2prod::{
     configuration::DatabaseSettings,
+    middleware,
     startup::{new_app, AppState},
+    telemetry,
 };
+
+static TRACING: Lazy<()> = Lazy::new(|| {
+    let default_filter_level = "info".to_string();
+    let subscriber_name = "test".to_string();
+    if std::env::var("TEST_LOG").is_ok() {
+        let subscriber = telemetry::get_tracing_subscriber(
+            subscriber_name,
+            default_filter_level,
+            std::io::stdout,
+        );
+        tracing::subscriber::set_global_default(subscriber.unwrap())
+            .expect("Failed to initialise tracing subscriber");
+    } else {
+        let subscriber =
+            telemetry::get_tracing_subscriber(subscriber_name, default_filter_level, std::io::sink)
+                .unwrap();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("Failed to initialise tracing subscriber");
+    };
+});
 
 #[cfg(test)]
 async fn new_test_app() -> (TestServer, AppState) {
     use std::sync::Arc;
     use uuid::Uuid;
+
+    Lazy::force(&TRACING);
 
     let mut config = match zero2prod::configuration::get_configuration() {
         Ok(config) => config,
@@ -22,7 +48,8 @@ async fn new_test_app() -> (TestServer, AppState) {
         db_pool: Arc::new(db_pool),
     };
 
-    let app = crate::new_app(state.clone());
+    let router = new_app(state.clone());
+    let app = middleware::add_request_id(router).into_make_service();
 
     (
         TestServer::new_with_config(
@@ -42,16 +69,17 @@ async fn new_test_app() -> (TestServer, AppState) {
 
 pub async fn configure_database(config: &DatabaseSettings) -> PgPool {
     // Create database
-    let mut connection = PgConnection::connect(&config.connection_string_without_db())
-        .await
-        .expect("Failed to connect to Postgres");
+    let mut connection =
+        PgConnection::connect(&config.connection_string_without_db().expose_secret())
+            .await
+            .expect("Failed to connect to Postgres");
     connection
         .execute(format!(r#"CREATE DATABASE "{}";"#, config.database_name).as_str())
         .await
         .expect("Failed to create database.");
 
     // Migrate database
-    let connection_pool = PgPool::connect(&config.connection_string())
+    let connection_pool = PgPool::connect(&config.connection_string().expose_secret())
         .await
         .expect("Failed to connect to Postgres.");
     sqlx::migrate!("./migrations")
