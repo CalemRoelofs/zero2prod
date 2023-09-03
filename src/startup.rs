@@ -1,17 +1,19 @@
-use crate::{configuration::Settings, routes};
+use crate::{configuration::Settings, middleware, routes, telemetry};
 use anyhow::{Context, Result};
 use axum::{
-    body::Body,
-    http::Request,
     routing::{get, post},
     Router, Server,
 };
 use sqlx::PgPool;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tower_http::trace::{self, TraceLayer};
-use tower_request_id::{RequestId, RequestIdLayer};
-use tracing::{error_span, Level};
+use tracing_subscriber::util::SubscriberInitExt;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub config: Arc<Settings>,
+    pub db_pool: Arc<PgPool>,
+}
 
 pub fn new_app(state: AppState) -> Router {
     Router::new()
@@ -20,47 +22,24 @@ pub fn new_app(state: AppState) -> Router {
         .with_state(state)
 }
 
-#[derive(Clone)]
-pub struct AppState {
-    pub config: Arc<Settings>,
-    pub db_pool: Arc<PgPool>,
-}
-
 pub async fn run(config: Settings, db_pool: PgPool) -> Result<()> {
     let state = AppState {
         config: Arc::new(config.clone()),
         db_pool: Arc::new(db_pool),
     };
 
-    tracing_subscriber::fmt().compact().init();
+    let subscriber =
+        telemetry::get_tracing_subscriber("zero2prod".into(), "info".into(), std::io::stdout)?;
+    subscriber.try_init()?;
 
-    let app = new_app(state)
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(|request: &Request<Body>| {
-                    let request_id = request
-                        .extensions()
-                        .get::<RequestId>()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "unknown".into());
-
-                    error_span!(
-                        "request",
-                        id = %request_id,
-                        method = %request.method(),
-                        uri = %request.uri(),
-                    )
-                })
-                .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
-        )
-        .layer(RequestIdLayer)
-        .into_make_service();
+    let router = new_app(state);
+    let app = middleware::add_request_id(router).into_make_service();
 
     let addr = SocketAddr::from(([127, 0, 0, 1], config.clone().application_port));
-    tracing::debug!("listening on {}", addr);
+    tracing::info!("Server starting on {}", addr);
 
     Server::bind(&addr)
         .serve(app)
         .await
-        .with_context(|| "Failed to start server!")
+        .with_context(|| "Failed to start server")
 }
